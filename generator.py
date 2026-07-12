@@ -5,119 +5,173 @@ import re
 import time
 import os
 
-# Основные источники
-SOURCES = [
-    "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Russia/Russia.list",
-    "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/yandex",
-    "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/vk",
-    "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/mailru",
-]
+# Базовый URL для v2fly (репозиторий со всеми правилами)
+V2FLY_BASE = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/"
 
-# Исключаемые национальные зоны
+# Исключаемые национальные зоны (нас интересуют только международные .com, .net, .io и тд)
 RU_TLDS = ('.ru', '.рф', '.su', '.xn--p1ai')
 
-# Локальные файлы для кастомизации
 CUSTOM_DOMAINS_FILE = "custom_domains.txt"
 EXCLUDE_DOMAINS_FILE = "exclude_domains.txt"
 
-async def check_domain(domain, resolver, semaphore, valid_domains):
-    """Асинхронно проверяет наличие A-записи у домена."""
-    async with semaphore:
-        try:
-            await resolver.query(domain, 'A')
-            valid_domains.add(domain)
-        except aiodns.error.DNSError:
-            pass
+# Прямые источники огромных списков (собираются комьюнити на базе ASN, BGP и сертификатов)
+DIRECT_SOURCES = [
+    "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Russia/Russia.list",
+    # itdoginfo — гигантский агрегатор доменов, хостящихся на IP-адресах РФ
+    "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst"
+]
+
+def fetch_v2fly_recursive(file_name, visited=None):
+    """Рекурсивно выкачивает все подкатегории (банки, маркетплейсы, хостинги) из базы v2fly."""
+    if visited is None:
+        visited = set()
+    
+    if file_name in visited:
+        return []
+    
+    visited.add(file_name)
+    url = V2FLY_BASE + file_name
+    print(f"  [v2fly] Выкачиваем ветку: {file_name}")
+    domains = []
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            return []
+            
+        for line in response.text.splitlines():
+            line = line.split('#')[0].strip() # Убираем комментарии
+            if not line:
+                continue
+                
+            # Если строка ссылается на другой список (например, include:sberbank) — идем внутрь
+            if line.startswith('include:'):
+                sub_file = line.split('include:')[1].strip()
+                domains.extend(fetch_v2fly_recursive(sub_file, visited))
+            else:
+                domain = extract_domain(line)
+                if domain:
+                    domains.append(domain)
+    except Exception as e:
+        print(f"  [v2fly] Ошибка при загрузке {file_name}: {e}")
+        
+    return domains
+
+def extract_domain(line):
+    """Умный экстрактор доменов, который понимает форматы Surge, Clash, Shadowrocket и V2Ray."""
+    line = line.split('#')[0].strip()
+    if not line:
+        return None
+        
+    # Формат Shadowrocket/Clash: DOMAIN-SUFFIX,yandex.com,DIRECT
+    if ',' in line:
+        parts = line.split(',')
+        if parts[0].strip().upper() in ('DOMAIN-SUFFIX', 'DOMAIN', 'HOST-SUFFIX', 'HOST'):
+            line = parts[1].strip()
+        else:
+            return None
+            
+    # Формат v2fly: full:yandex.com или domain:yandex.com
+    line = line.replace('full:', '').replace('domain:', '')
+    # Убираем атрибуты вроде @cn
+    line = line.split('@')[0].strip()
+    
+    # Строгая проверка, что на выходе получился чистый домен
+    if re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', line):
+        return line.lower()
+    return None
 
 def load_local_list(filename):
-    """Загружает домены из локального файла, игнорируя комментарии."""
+    """Читает локальные файлы пользователя."""
     domains = set()
     if os.path.exists(filename):
         with open(filename, 'r', encoding='utf-8') as f:
             for line in f:
-                line = line.split('#')[0].strip().lower()
-                if line:
-                    domains.add(line)
+                d = extract_domain(line)
+                if d:
+                    domains.add(d)
     return domains
 
 def fetch_and_clean_domains():
-    """Собирает домены из источников по ссылкам."""
+    """Сбор всей базы воедино."""
     raw_domains = set()
-    domain_pattern = re.compile(r'^(?:DOMAIN(?:-SUFFIX)?(?:-KEYWORD)?,)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$')
-
-    for url in SOURCES:
-        print(f"Загрузка из: {url}")
+    
+    print("-> 1. Загрузка дерева v2fly (банки, госсектор, IT-компании, ритейл)...")
+    v2fly_domains = fetch_v2fly_recursive("category-ru")
+    raw_domains.update(v2fly_domains)
+    
+    print("-> 2. Загрузка агрегированных дампов (сети провайдеров, ASN)...")
+    for url in DIRECT_SOURCES:
+        print(f"  Парсинг: {url.split('/')[-1]}")
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            
-            for line in response.text.splitlines():
-                line = line.split('#')[0].strip()
-                if not line:
-                    continue
-                
-                match = domain_pattern.match(line)
-                if match:
-                    domain = match.group(1).lower()
-                    if not domain.endswith(RU_TLDS):
-                        raw_domains.add(domain)
+            response = requests.get(url, timeout=20)
+            if response.status_code == 200:
+                for line in response.text.splitlines():
+                    d = extract_domain(line)
+                    if d:
+                        raw_domains.add(d)
         except Exception as e:
-            print(f"Ошибка загрузки {url}: {e}")
+            print(f"  Ошибка загрузки: {e}")
+            
+    print(f"\nВсего собрано доменов до фильтрации: {len(raw_domains)}")
+    # Отсекаем чисто российские зоны
+    international = {d for d in raw_domains if not d.endswith(RU_TLDS)}
+    return international
 
-    return raw_domains
+async def check_domain(domain, resolver, semaphore, valid_domains):
+    """Проверяет, жив ли домен в реальности."""
+    async with semaphore:
+        try:
+            await resolver.query(domain, 'A')
+            valid_domains.add(domain)
+        except Exception:
+            pass # Если домен мертвый (устарел, отозван), мы его просто забываем
 
 async def main():
     start_time = time.time()
     
-    print("1. Сбор доменов из сети...")
     raw_domains = fetch_and_clean_domains()
     
-    print("2. Загрузка пользовательских доменов...")
+    print("-> 3. Подключение ваших локальных списков...")
     custom_domains = load_local_list(CUSTOM_DOMAINS_FILE)
     raw_domains.update(custom_domains)
-    print(f"Своих доменов добавлено: {len(custom_domains)}")
     
-    print("3. Применение списка исключений...")
     exclude_domains = load_local_list(EXCLUDE_DOMAINS_FILE)
     if exclude_domains:
-        filtered_domains = set()
+        filtered = set()
         for d in raw_domains:
-            # Проверяем, не совпадает ли домен с исключением и не является ли он его поддоменом
+            # Удаляем как точное совпадение, так и все поддомены исключений
             if not any(d == ex or d.endswith('.' + ex) for ex in exclude_domains):
-                filtered_domains.add(d)
-        raw_domains = filtered_domains
-        print(f"Доменов в списке исключений: {len(exclude_domains)}")
+                filtered.add(d)
+        raw_domains = filtered
         
-    print(f"Итого уникальных доменов для проверки: {len(raw_domains)}")
+    print(f"\nИтого уникальных МЕЖДУНАРОДНЫХ доменов для проверки: {len(raw_domains)}")
     
-    print("4. Проверка существования доменов (DNS Resolve)...")
+    print("-> 4. Массовая DNS-проверка (отсеивание мусора)...")
     resolver = aiodns.DNSResolver()
     valid_domains = set()
-    semaphore = asyncio.Semaphore(200)
+    # 300 одновременных подключений, чтобы проверить десятки тысяч доменов за пару минут
+    semaphore = asyncio.Semaphore(300) 
     
-    tasks = [
-        check_domain(domain, resolver, semaphore, valid_domains)
-        for domain in raw_domains
-    ]
-    
+    tasks = [check_domain(d, resolver, semaphore, valid_domains) for d in raw_domains]
     await asyncio.gather(*tasks)
+    
     sorted_domains = sorted(list(valid_domains))
     
-    print("5. Генерация Russia_International.list...")
+    print("-> 5. Генерация Russia_International.list...")
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российских сервисов\n")
+        f.write("# Источники: v2fly, BlackMatrix, itdoginfo (ASN/CIDR)\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
-        f.write(f"# Всего доменов: {len(sorted_domains)}\n\n")
-        
+        f.write(f"# Всего живых доменов: {len(sorted_domains)}\n\n")
         for domain in sorted_domains:
             f.write(f"DOMAIN-SUFFIX,{domain}\n")
             
-    print(f"Готово! Сохранено {len(sorted_domains)} рабочих доменов.")
+    print(f"\nГотово! Сохранено {len(sorted_domains)} рабочих доменов.")
     print(f"Затрачено времени: {round(time.time() - start_time, 2)} сек.")
 
 if __name__ == "__main__":
     import sys
     if sys.version_info[0] == 3 and sys.version_info[1] >= 8 and sys.platform.startswith('win'):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
     asyncio.run(main())
