@@ -9,8 +9,9 @@ import tldextract
 from contextlib import closing
 from collections import defaultdict
 
-# --- КОНФИГУРАЦИЯ ИСТОЧНИКОВ ---
+# --- КОНФИГУРАЦИЯ ---
 WEIGHT_THRESHOLD = 100
+RDAP_WEIGHT_BONUS = 50
 
 SOURCES_CONFIG = [
     {
@@ -18,26 +19,25 @@ SOURCES_CONFIG = [
         "type": "v2fly_tree",
         "url": "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/",
         "entry_point": "category-ru",
-        "weight": 100
+        "weight": 60
     },
     {
         "name": "MetaCubeX",
         "type": "plain",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/ru.list",
-        "weight": 80
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ru.list",
+        "weight": 50
     },
     {
         "name": "Loyalsoldier",
         "type": "plain",
-        # Для примера берем прямой текстовый исходник от Loyalsoldier (yandex/mailru и тд)
         "url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
-        "weight": 70
+        "weight": 40
     },
     {
         "name": "BlackMatrix",
         "type": "plain",
         "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Russia/Russia.list",
-        "weight": 60
+        "weight": 40
     }
 ]
 
@@ -48,7 +48,14 @@ CUSTOM_DOMAINS_FILE = "custom_domains.txt"
 EXCLUDE_DOMAINS_FILE = "exclude_domains.txt"
 CACHE_DB = ".cache.db"
 
-# Инициализация tldextract
+STATS = {
+    "total_processed": 0,
+    "total_approved": 0,
+    "sources": defaultdict(int),
+    "rdap_promoted": 0,
+    "rejected": 0
+}
+
 extract = tldextract.TLDExtract(cache_dir='.tld_cache')
 
 # --- КЭШ ---
@@ -60,8 +67,7 @@ class LocalCache:
     def _init_db(self):
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
-                conn.execute('''CREATE TABLE IF NOT EXISTS cache
-                                (key TEXT PRIMARY KEY, value TEXT, timestamp REAL)''')
+                conn.execute('CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, timestamp REAL)')
 
     def get(self, key, ttl=86400):
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -77,19 +83,17 @@ class LocalCache:
 
 cache = LocalCache()
 
-# --- ПАРСЕР И НОРМАЛИЗАТОР ---
+# --- ПАРСЕР ---
 class RuleParser:
     @staticmethod
     def get_registered_domain(domain_str):
-        """Возвращает строго корневой домен (registrable domain). api.vk.com -> vk.com"""
         ext = extract(domain_str)
-        if ext.registered_domain:
-            return ext.registered_domain.lower()
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}".lower()
         return None
 
     @staticmethod
     def extract_from_regex(rule):
-        # Очистка от сложных regex-конструкций вроде (?:^|\.)
         clean_rule = rule.replace('regexp:', '').replace('\\.', '.')
         clean_rule = re.sub(r'(?:\(\?\:\^\|\\\.|\^|\\b|\$)', ' ', clean_rule)
         clean_rule = re.sub(r'[\(\)|*+?\[\]\\]', ' ', clean_rule)
@@ -115,8 +119,7 @@ class RuleParser:
                 parts = raw_rule.split(',')
                 if parts[0].strip().upper() in ('DOMAIN-SUFFIX', 'DOMAIN'):
                     raw_rule = parts[1].strip()
-                else:
-                    return set()
+                else: return set()
                     
             raw_rule = raw_rule.replace('full:', '').replace('domain:', '').replace('+', '').split('@')[0].strip()
             raw_rule = raw_rule.replace("'", "").replace('"', "")
@@ -138,8 +141,10 @@ class CrawlerEngine:
             if resp.status_code == 200:
                 cache.set(cache_key, resp.text)
                 return resp.text
+            else:
+                print(f"  [WARN] {url} вернул статус {resp.status_code}")
         except Exception as e:
-            print(f"  [-] Ошибка: {url} -> {e}")
+            print(f"  [WARN] Ошибка: {url} -> {e}")
         return ""
 
     async def crawl_v2fly_tree(self, base_url, category, visited):
@@ -158,7 +163,7 @@ class CrawlerEngine:
         return rules
 
     async def run_source(self, source_conf):
-        print(f"  [>] Парсинг источника: {source_conf['name']} (Вес: {source_conf['weight']})")
+        print(f"  [>] Парсинг: {source_conf['name']} (Вес: {source_conf['weight']})")
         if source_conf['type'] == 'v2fly_tree':
             return await self.crawl_v2fly_tree(source_conf['url'], source_conf['entry_point'], set())
         elif source_conf['type'] == 'plain':
@@ -178,26 +183,19 @@ class RDAPChecker:
         self.client = httpx.AsyncClient(http2=True, timeout=10.0)
         self.semaphore = asyncio.Semaphore(10)
 
-    async def is_russian(self, domain):
+    async def check_domain(self, domain):
         cached = cache.get(f"rdap_{domain}", ttl=2592000)
-        if cached == 'RU': return True
-        if cached == 'FOREIGN': return False
+        if cached: return cached == 'RU'
 
         async with self.semaphore:
             try:
                 resp = await self.client.get(f"https://rdap.org/domain/{domain}")
                 if resp.status_code == 200:
-                    data = resp.json()
-                    
-                    # Тотальный поиск паттернов по всему дампу JSON
-                    dump = json.dumps(data).lower()
-                    
-                    # Ищем маркеры RU-сегмента (страна, город, юрлицо)
+                    dump = json.dumps(resp.json()).lower()
                     markers = [
                         '"country": "ru"', '"country":"ru"', '"cc": "ru"', '"cc":"ru"',
-                        'russian federation', 'moscow', 'saint petersburg', 'yandex llc'
+                        'russian federation', 'moscow', 'saint petersburg', 'yandex llc', 'ru-center'
                     ]
-                    
                     if any(marker in dump for marker in markers):
                         cache.set(f"rdap_{domain}", 'RU')
                         return True
@@ -213,28 +211,27 @@ class RDAPChecker:
 # --- ОРКЕСТРАТОР ---
 async def main():
     start_time = time.time()
-    print("=== RU DomainSet Generator V6 (Root Domain + RDAP JSON) ===")
-
     domain_weights = defaultdict(int)
+    domain_sources = defaultdict(list)
 
-    # 1. ЗАПУСК ИСТОЧНИКОВ ИЗ КОНФИГА
+    # 1. ЗАПУСК ИСТОЧНИКОВ
     crawler = CrawlerEngine()
     for conf in SOURCES_CONFIG:
         domains = await crawler.run_source(conf)
         for d in domains:
             domain_weights[d] += conf['weight']
+            domain_sources[d].append(conf['name'])
+            STATS["sources"][conf['name']] += 1
     await crawler.close()
 
-    # Добавляем локальные whitelist домены
     if os.path.exists(CUSTOM_DOMAINS_FILE):
-        print(f"  [>] Парсинг источника: Local Custom (Вес: {CUSTOM_WEIGHT})")
         with open(CUSTOM_DOMAINS_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 for d in RuleParser.clean(line):
                     domain_weights[d] += CUSTOM_WEIGHT
+                    domain_sources[d].append('Custom')
 
-    # 2. ФИЛЬТРАЦИЯ .RU И ИСКЛЮЧЕНИЙ
-    print("\n2. Очистка и фильтрация...")
+    # 2. ФИЛЬТРАЦИЯ
     exclude_set = set()
     if os.path.exists(EXCLUDE_DOMAINS_FILE):
         with open(EXCLUDE_DOMAINS_FILE, 'r', encoding='utf-8') as f:
@@ -242,9 +239,15 @@ async def main():
                 exclude_set.update(RuleParser.clean(line))
 
     candidate_domains = {}
+    rejected_log = []
+
     for dom, weight in domain_weights.items():
-        if dom.endswith(RU_TLDS): continue
-        if dom in exclude_set: continue
+        STATS["total_processed"] += 1
+        if dom.endswith(RU_TLDS):
+            continue
+        if any(dom == ex or dom.endswith('.' + ex) for ex in exclude_set):
+            rejected_log.append(f"{dom} -> Excluded by user list")
+            continue
         candidate_domains[dom] = weight
 
     # 3. АНАЛИЗ ВЕСОВ
@@ -257,37 +260,47 @@ async def main():
         else:
             grey_zone.add(dom)
 
-    print(f"   Зеленая зона (Вес >= {WEIGHT_THRESHOLD}): {len(final_domains)} доменов.")
-    print(f"   Серая зона (Требует RDAP): {len(grey_zone)} доменов.")
-
-    # 4. RDAP ПРОВЕРКА СЕРОЙ ЗОНЫ
+    # 4. RDAP БАЛАНСИР
     if grey_zone:
-        print("\n4. Выполнение RDAP-проверки...")
+        print(f"\n4. RDAP-проверка серой зоны ({len(grey_zone)} доменов)...")
         rdap = RDAPChecker()
         
         async def verify_and_add(d):
-            if await rdap.is_russian(d):
-                final_domains.add(d)
+            if await rdap.check_domain(d):
+                domain_weights[d] += RDAP_WEIGHT_BONUS
+                if domain_weights[d] >= WEIGHT_THRESHOLD:
+                    final_domains.add(d)
+                    STATS["rdap_promoted"] += 1
+                else:
+                    rejected_log.append(f"{d} -> Not enough weight even with RDAP ({domain_weights[d]}/{WEIGHT_THRESHOLD})")
+            else:
+                rejected_log.append(f"{d} -> Failed RDAP and weight check ({domain_weights[d]}/{WEIGHT_THRESHOLD}). Sources: {domain_sources[d]}")
 
         tasks = [verify_and_add(d) for d in grey_zone]
         await asyncio.gather(*tasks)
         await rdap.close()
 
-    # 5. ГЕНЕРАЦИЯ
+    STATS["total_approved"] = len(final_domains)
+    STATS["rejected"] = len(rejected_log)
+
+    # 5. ГЕНЕРАЦИЯ И ЛОГИ
     sorted_domains = sorted(list(final_domains))
-    
-    print("\n5. Запись Russia_International.list...")
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российского сегмента\n")
-        f.write("# Архитектура V6 (Root Domain Configurable Pipeline)\n")
+        f.write("# Архитектура V7: Multi-Source Weight Consensus + RDAP Bonus\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
         f.write(f"# Всего уникальных доменов: {len(sorted_domains)}\n\n")
-        
         for domain in sorted_domains:
             f.write(f"DOMAIN-SUFFIX,{domain}\n")
 
-    print(f"\n[УСПЕХ] Сохранено {len(sorted_domains)} чистых корневых доменов.")
-    print(f"Затрачено времени: {round(time.time() - start_time, 2)} сек.")
+    with open("stats.json", "w", encoding="utf-8") as f:
+        json.dump(STATS, f, indent=4)
+
+    with open("rejected_domains.log", "w", encoding="utf-8") as f:
+        f.write("\n".join(rejected_log))
+
+    print(f"\n[УСПЕХ] Сохранено {STATS['total_approved']} доменов.")
+    print(f"Отброшено: {STATS['rejected']}. Повышено через RDAP: {STATS['rdap_promoted']}.")
 
 if __name__ == "__main__":
     import sys
