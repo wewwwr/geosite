@@ -7,8 +7,28 @@ import json
 import tldextract
 from collections import defaultdict
 
-# --- КОНФИГУРАЦИЯ ---
-# Оставили только строго российские списки
+# ==========================================
+# --- КОНФИГУРАЦИЯ КАСТОМНЫХ ДОМЕНОВ ---
+# ==========================================
+
+# 1. Твои кастомные домены (ДОБАВЛЯТЬ СЮДА)
+# Эти домены будут добавлены в самое начало списка и проигнорируют любые фильтры/исключения
+CUSTOM_DOMAINS = [
+    "ru",
+    "su",
+    "рф",
+]
+
+# 2. Исключения (ДОБАВЛЯТЬ СЮДА)
+# Эти домены будут принудительно удалены из итогового списка
+EXCLUDE_DOMAINS = [
+    "bad-domain.com",
+    "ads-.org",
+]
+
+# ==========================================
+# --- КОНФИГУРАЦИЯ ИСТОЧНИКОВ ---
+# ==========================================
 SOURCES_CONFIG = [
     {
         "name": "V2Fly",
@@ -19,7 +39,6 @@ SOURCES_CONFIG = [
     {
         "name": "MetaCubeX_RU",
         "type": "plain",
-        # У MetaCubeX бывает два варианта названия файла, пробуем оба
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/ru.list"
     },
     {
@@ -35,8 +54,6 @@ SOURCES_CONFIG = [
 ]
 
 RU_TLDS = ('.ru', '.рф', '.su', '.xn--p1ai')
-CUSTOM_DOMAINS_FILE = "custom_domains.txt"
-EXCLUDE_DOMAINS_FILE = "exclude_domains.txt"
 
 STATS = {
     "sources": defaultdict(int),
@@ -142,63 +159,73 @@ async def main():
     start_time = time.time()
     print("=== Запуск RU DomainSet Aggregator ===")
 
-    all_domains = set()
+    # 1. Подготовка встроенных кастомных списков
+    processed_custom_domains = set()
+    for item in CUSTOM_DOMAINS:
+        processed_custom_domains.update(RuleParser.clean(item))
+    STATS["sources"]["Custom"] = len(processed_custom_domains)
 
-    # 1. Сбор из источников
+    exclude_set = set()
+    for item in EXCLUDE_DOMAINS:
+        exclude_set.update(RuleParser.clean(item))
+
+    # 2. Сбор из источников
+    all_fetched_domains = set()
     crawler = CrawlerEngine()
     for conf in SOURCES_CONFIG:
         domains = await crawler.run_source(conf)
         STATS["sources"][conf['name']] = len(domains)
-        all_domains.update(domains)
+        all_fetched_domains.update(domains)
     await crawler.close()
 
-    # Сбор пользовательских доменов
-    if os.path.exists(CUSTOM_DOMAINS_FILE):
-        print("-> Парсинг: Local Custom")
-        with open(CUSTOM_DOMAINS_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                custom_domains = RuleParser.clean(line)
-                STATS["sources"]["Custom"] += len(custom_domains)
-                all_domains.update(custom_domains)
+    print(f"\nВсего собрано уникальных доменов из сетей до фильтрации: {len(all_fetched_domains)}")
 
-    print(f"\nВсего собрано уникальных корневых доменов до фильтрации: {len(all_domains)}")
-
-    # 2. Фильтрация исключений и RU-зон
-    exclude_set = set()
-    if os.path.exists(EXCLUDE_DOMAINS_FILE):
-        with open(EXCLUDE_DOMAINS_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                exclude_set.update(RuleParser.clean(line))
-
-    final_domains = set()
-    for dom in all_domains:
+    # 3. Фильтрация исключений и RU-зон (только для собранных из сети)
+    final_auto_domains = set()
+    for dom in all_fetched_domains:
+        # Пропускаем, если домен уже есть в твоих кастомных (чтобы не было дублей ниже)
+        if dom in processed_custom_domains:
+            continue
+            
         # Отсекаем национальные зоны
         if dom.endswith(RU_TLDS):
             STATS["excluded"] += 1
             continue
+            
         # Строгая проверка на пользовательские исключения
         if any(dom == ex or dom.endswith('.' + ex) for ex in exclude_set):
             STATS["excluded"] += 1
             continue
             
-        final_domains.add(dom)
+        final_auto_domains.add(dom)
 
-    STATS["total_approved"] = len(final_domains)
+    STATS["total_approved"] = len(processed_custom_domains) + len(final_auto_domains)
 
-    # 3. Генерация файлов
-    sorted_domains = sorted(list(final_domains))
+    # 4. Генерация файлов
+    sorted_custom = sorted(list(processed_custom_domains))
+    sorted_auto = sorted(list(final_auto_domains))
+
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российского сегмента\n")
         f.write("# Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
-        f.write(f"# Всего уникальных доменов: {len(sorted_domains)}\n\n")
-        for domain in sorted_domains:
+        f.write(f"# Всего уникальных доменов: {STATS['total_approved']}\n\n")
+        
+        # СНАЧАЛА пишем кастомные домены, чтобы они были в топе
+        if sorted_custom:
+            f.write("# --- Пользовательские домены (Custom) ---\n")
+            for domain in sorted_custom:
+                f.write(f"DOMAIN-SUFFIX,{domain}\n")
+            f.write("\n# --- Автоматически собранные домены ---\n")
+            
+        # ЗАТЕМ все остальные
+        for domain in sorted_auto:
             f.write(f"DOMAIN-SUFFIX,{domain}\n")
 
     with open("stats.json", "w", encoding="utf-8") as f:
         json.dump(STATS, f, indent=4)
 
-    print(f"\n[УСПЕХ] Сохранено {STATS['total_approved']} доменов.")
+    print(f"\n[УСПЕХ] Сохранено {STATS['total_approved']} доменов (из них кастомных: {len(sorted_custom)}).")
     print(f"Отброшено (.ru или исключения): {STATS['excluded']}.")
     print(f"Время выполнения: {round(time.time() - start_time, 2)} сек.")
 
