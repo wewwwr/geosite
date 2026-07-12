@@ -180,8 +180,10 @@ class CrawlerEngine:
 # --- RDAP CHECKER ---
 class RDAPChecker:
     def __init__(self):
-        self.client = httpx.AsyncClient(http2=True, timeout=10.0)
-        self.semaphore = asyncio.Semaphore(10)
+        # Жесткий таймаут в 3 секунды. Если RDAP завис — отбрасываем соединение.
+        self.client = httpx.AsyncClient(http2=True, timeout=3.0)
+        # Сниженная параллельность, чтобы серверы регистраторов не забанили нас за DDoS
+        self.semaphore = asyncio.Semaphore(5)
 
     async def check_domain(self, domain):
         cached = cache.get(f"rdap_{domain}", ttl=2592000)
@@ -199,8 +201,11 @@ class RDAPChecker:
                     if any(marker in dump for marker in markers):
                         cache.set(f"rdap_{domain}", 'RU')
                         return True
+                elif resp.status_code == 429:
+                    # Если сервер RDAP просит притормозить, ждем секунду
+                    await asyncio.sleep(1)
             except Exception:
-                pass
+                pass # Таймаут или ошибка соединения (молчим и идем дальше)
                 
         cache.set(f"rdap_{domain}", 'FOREIGN')
         return False
@@ -260,12 +265,16 @@ async def main():
         else:
             grey_zone.add(dom)
 
-    # 4. RDAP БАЛАНСИР
+    # 4. RDAP БАЛАНСИР С ПРОГРЕССОМ
     if grey_zone:
-        print(f"\n4. RDAP-проверка серой зоны ({len(grey_zone)} доменов)...")
+        total_grey = len(grey_zone)
+        print(f"\n4. RDAP-проверка серой зоны ({total_grey} доменов)...")
         rdap = RDAPChecker()
         
+        processed_rdap = 0
+        
         async def verify_and_add(d):
+            nonlocal processed_rdap
             if await rdap.check_domain(d):
                 domain_weights[d] += RDAP_WEIGHT_BONUS
                 if domain_weights[d] >= WEIGHT_THRESHOLD:
@@ -275,6 +284,11 @@ async def main():
                     rejected_log.append(f"{d} -> Not enough weight even with RDAP ({domain_weights[d]}/{WEIGHT_THRESHOLD})")
             else:
                 rejected_log.append(f"{d} -> Failed RDAP and weight check ({domain_weights[d]}/{WEIGHT_THRESHOLD}). Sources: {domain_sources[d]}")
+            
+            # Печатаем лог прогресса каждую сотню, чтобы GitHub Actions не считал скрипт зависшим
+            processed_rdap += 1
+            if processed_rdap % 100 == 0 or processed_rdap == total_grey:
+                print(f"   [RDAP] Проверено: {processed_rdap} / {total_grey}")
 
         tasks = [verify_and_add(d) for d in grey_zone]
         await asyncio.gather(*tasks)
@@ -287,7 +301,7 @@ async def main():
     sorted_domains = sorted(list(final_domains))
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российского сегмента\n")
-        f.write("# Архитектура V7: Multi-Source Weight Consensus + RDAP Bonus\n")
+        f.write("# Архитектура V7.1: Multi-Source Weight Consensus + Optimized RDAP\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
         f.write(f"# Всего уникальных доменов: {len(sorted_domains)}\n\n")
         for domain in sorted_domains:
