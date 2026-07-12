@@ -1,8 +1,14 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-07-12 20:19:47 UTC
-# Всего уникальных доменов: 761
+# Обновлено: 2026-07-12 20:22:55 UTC
+# Всего уникальных доменов: 764
 
+# --- Пользовательские домены (Custom) ---
+DOMAIN-SUFFIX,ru
+DOMAIN-SUFFIX,su
+DOMAIN-SUFFIX,рф
+
+# --- Автоматически собранные домены ---
 DOMAIN-SUFFIX,1917live.red
 DOMAIN-SUFFIX,24h.tv
 DOMAIN-SUFFIX,2gis.ae
