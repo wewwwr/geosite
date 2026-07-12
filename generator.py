@@ -89,6 +89,7 @@ class RuleParser:
 
     @staticmethod
     def clean(raw_rule):
+        """Строгая чистка только для доменов из внешних источников"""
         raw_rule = raw_rule.split('#')[0].strip()
         if not raw_rule or raw_rule.startswith('keyword:'):
             return set()
@@ -155,19 +156,29 @@ class CrawlerEngine:
     async def close(self):
         await self.client.aclose()
 
+def simple_clean_custom(item):
+    """Легкая чистка для твоих списков (без строгих проверок tldextract)"""
+    item = item.split('#')[0].strip().lower()
+    item = item.replace('domain-suffix,', '').replace('domain,', '').replace("'", "").replace('"', "")
+    return item
+
 async def main():
     start_time = time.time()
     print("=== Запуск RU DomainSet Aggregator ===")
 
-    # 1. Подготовка встроенных кастомных списков
+    # 1. Подготовка встроенных кастомных списков (без строгих проверок)
     processed_custom_domains = set()
     for item in CUSTOM_DOMAINS:
-        processed_custom_domains.update(RuleParser.clean(item))
+        cleaned = simple_clean_custom(item)
+        if cleaned:
+            processed_custom_domains.add(cleaned)
     STATS["sources"]["Custom"] = len(processed_custom_domains)
 
     exclude_set = set()
     for item in EXCLUDE_DOMAINS:
-        exclude_set.update(RuleParser.clean(item))
+        cleaned = simple_clean_custom(item)
+        if cleaned:
+            exclude_set.add(cleaned)
 
     # 2. Сбор из источников
     all_fetched_domains = set()
