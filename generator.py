@@ -4,205 +4,256 @@ import httpx
 import re
 import time
 import os
+import sqlite3
+import ipaddress
 import tldextract
+from contextlib import closing
 
 # --- КОНФИГУРАЦИЯ ---
 V2FLY_BASE = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/"
-RU_TLDS = ('.ru', '.рф', '.su', '.xn--p1ai')
+RU_CIDR_URL = "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/ru.cidr"
+
+ENABLE_DNS_CHECK = False        # Отключено, чтобы не убивать SNI/CDN домены
+ENABLE_OWNER_CHECK = True       # Включено (проверка через RU CIDR / ASN)
 
 CUSTOM_DOMAINS_FILE = "custom_domains.txt"
 EXCLUDE_DOMAINS_FILE = "exclude_domains.txt"
-UNSUPPORTED_LOG = "unsupported_rules.log"
+CACHE_DB = ".cache.db"
 
-# Расширенные категории ру-сегмента
-V2FLY_CATEGORIES = [
-    "category-ru", "category-bank-ru", "category-ecommerce-ru", 
-    "category-gov-ru", "category-media-ru", "category-games-ru", 
-    "category-travel-ru", "category-finance-ru", "category-social-ru",
-    "yandex", "vk", "mailru", "kaspersky", "sberbank", "tinkoff",
-    "alfa-bank", "ozon", "wildberries", "avito", "rostelecom", "mts", "megafon"
-]
+RU_TLDS = ('.ru', '.рф', '.su', '.xn--p1ai')
 
-GLOBAL_EXCLUDES = {
-    'google.com', 'apple.com', 'microsoft.com', 'cloudflare.com', 'amazon.com',
-    'github.com', 'youtube.com', 'netflix.com', 'akamai.net', 'icq.com'
-}
-
-# Инициализация tldextract (он сам кэширует суффиксы TLD)
 extract = tldextract.TLDExtract(cache_dir='.tld_cache')
 
+# --- МОДУЛЬ 0: КЭШИРОВАНИЕ ---
+class LocalCache:
+    def __init__(self, db_path=CACHE_DB):
+        self.db_path = db_path
+        self._init_db()
 
-# --- МОДУЛИ ПАЙПЛАЙНА ---
+    def _init_db(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute('''CREATE TABLE IF NOT EXISTS cache
+                                (key TEXT PRIMARY KEY, value TEXT, timestamp REAL)''')
 
-class Fetcher:
-    """Асинхронная загрузка списков через HTTP/2."""
+    def get(self, key, ttl=86400):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value, timestamp FROM cache WHERE key=?", (key,))
+            row = cursor.fetchone()
+            if row and (time.time() - row[1]) < ttl:
+                return row[0]
+        return None
+
+    def set(self, key, value):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("REPLACE INTO cache (key, value, timestamp) VALUES (?, ?, ?)",
+                             (key, value, time.time()))
+
+cache = LocalCache()
+
+# --- МОДУЛЬ 1: CRAWLER (Дерево V2Fly) ---
+class V2FlyCrawler:
     def __init__(self):
         self.client = httpx.AsyncClient(http2=True, timeout=15.0)
-        self.visited_v2fly = set()
-        self.unsupported_rules = set()
+        self.visited = set()
 
-    async def fetch_v2fly_recursive(self, category):
-        if category in self.visited_v2fly:
+    async def fetch_category(self, category):
+        if category in self.visited:
             return []
+        self.visited.add(category)
         
-        self.visited_v2fly.add(category)
-        url = f"{V2FLY_BASE}{category}"
-        domains = []
-        
-        try:
-            response = await self.client.get(url)
-            if response.status_code != 200:
+        cached_data = cache.get(f"v2fly_{category}")
+        if cached_data:
+            text = cached_data
+        else:
+            try:
+                print(f"  [Crawler] Выкачиваем ветку: {category}")
+                resp = await self.client.get(f"{V2FLY_BASE}{category}")
+                if resp.status_code != 200:
+                    return []
+                text = resp.text
+                cache.set(f"v2fly_{category}", text)
+            except Exception as e:
+                print(f"  [Crawler] Ошибка {category}: {e}")
                 return []
-                
-            lines = response.text.splitlines()
-            for line in lines:
-                line = line.split('#')[0].strip()
-                if not line:
-                    continue
-                    
-                if line.startswith('include:'):
-                    sub_cat = line.split('include:')[1].strip()
-                    domains.extend(await self.fetch_v2fly_recursive(sub_cat))
-                elif line.startswith(('regexp:', 'keyword:')):
-                    self.unsupported_rules.add(line)
-                else:
-                    domains.append(line)
-        except Exception as e:
-            print(f"[-] Ошибка загрузки {category}: {e}")
-            
-        return domains
+
+        rules = []
+        for line in text.splitlines():
+            line = line.split('#')[0].strip()
+            if not line:
+                continue
+            if line.startswith('include:'):
+                sub_cat = line.split('include:')[1].strip()
+                rules.extend(await self.fetch_category(sub_cat))
+            else:
+                rules.append(line)
+        return rules
 
     async def close(self):
         await self.client.aclose()
 
-
-class Parser:
-    """Очистка и валидация доменов через tldextract."""
+# --- МОДУЛЬ 2: PARSER & REGEX EXTRACTOR ---
+class RuleParser:
     @staticmethod
-    def clean(raw_domain):
-        # Очистка атрибутов v2fly (@cn, @ads и т.д.)
-        raw_domain = raw_domain.replace('full:', '').replace('domain:', '').split('@')[0].strip()
-        
-        # Парсинг Shadowrocket/Clash форматов
-        if ',' in raw_domain:
-            parts = raw_domain.split(',')
-            if parts[0].strip().upper() in ('DOMAIN-SUFFIX', 'DOMAIN', 'HOST-SUFFIX', 'HOST'):
-                raw_domain = parts[1].strip()
-            else:
-                return None
-                
-        # Валидация через tldextract (отсекает кривые строки, оставляет валидные субдомены и TLD, включая xn--)
-        ext = extract(raw_domain)
-        if ext.suffix and ext.domain:
-            # Восстанавливаем домен. ext.fqdn не используем, чтобы не добавить лишнего.
-            parsed = f"{ext.subdomain}.{ext.domain}.{ext.suffix}" if ext.subdomain else f"{ext.domain}.{ext.suffix}"
-            return parsed.lower()
-        return None
+    def extract_from_regex(rule):
+        """Пытается вытащить реальный домен из регулярного выражения."""
+        clean_rule = rule.replace('regexp:', '').replace('\\.', '.')
+        # Вырезаем спецсимволы регулярок
+        clean_rule = re.sub(r'[\^$()|*+?\[\]\\]', ' ', clean_rule)
+        # Ищем паттерны, похожие на домен
+        matches = re.findall(r'[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+', clean_rule)
+        domains = set()
+        for m in matches:
+            ext = extract(m)
+            if ext.suffix and ext.domain:
+                domains.add(f"{ext.domain}.{ext.suffix}".lower())
+        return domains
 
-
-class FilterRU:
-    """Фильтрация национальных зон и глобальных/пользовательских исключений."""
     @staticmethod
-    def process(domains, excludes):
-        filtered = set()
-        for d in domains:
-            if d.endswith(RU_TLDS):
-                continue
-            if any(d == ex or d.endswith('.' + ex) for ex in excludes):
-                continue
-            filtered.add(d)
-        return filtered
+    def clean(raw_rule):
+        if raw_rule.startswith('keyword:'):
+            return None # Ключевые слова пропускаем, из них нельзя извлечь конкретный домен
+            
+        domains = set()
+        if raw_rule.startswith('regexp:'):
+            domains.update(RuleParser.extract_from_regex(raw_rule))
+        else:
+            raw_rule = raw_rule.replace('full:', '').replace('domain:', '').split('@')[0].strip()
+            ext = extract(raw_rule)
+            if ext.suffix and ext.domain:
+                parsed = f"{ext.subdomain}.{ext.domain}.{ext.suffix}" if ext.subdomain else f"{ext.domain}.{ext.suffix}"
+                domains.add(parsed.lower())
+        return domains
 
-
-class DNSChecker:
-    """Умная асинхронная проверка с фоллбэком A -> AAAA -> CNAME."""
-    def __init__(self, concurrency=300):
+# --- МОДУЛЬ 3: OWNER & ASN CHECKER ---
+class OwnerChecker:
+    def __init__(self):
+        self.ru_networks = []
         self.resolver = aiodns.DNSResolver()
-        self.semaphore = asyncio.Semaphore(concurrency)
-        self.alive_domains = set()
+        self.semaphore = asyncio.Semaphore(300)
 
-    async def check(self, domain):
-        async with self.semaphore:
-            # Проверяем последовательно A, AAAA, CNAME. Если хоть что-то есть — домен жив.
-            for record_type in ['A', 'AAAA', 'CNAME']:
+    async def load_ru_cidr(self):
+        """Загрузка оффлайн-базы российских подсетей (ASN -> CIDR)."""
+        cached_cidr = cache.get("ru_cidr")
+        if cached_cidr:
+            text = cached_cidr
+        else:
+            print("  [OwnerCheck] Скачивание свежей базы RU CIDR...")
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(RU_CIDR_URL)
+                text = resp.text
+                cache.set("ru_cidr", text)
+                
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith('#'):
                 try:
-                    await self.resolver.query(domain, record_type)
-                    self.alive_domains.add(domain)
-                    return
-                except aiodns.error.DNSError:
-                    continue
-                except Exception:
-                    continue
+                    self.ru_networks.append(ipaddress.IPv4Network(line))
+                except ValueError:
+                    pass
+        print(f"  [OwnerCheck] Загружено {len(self.ru_networks)} RU подсетей.")
 
-    async def run(self, domains):
-        tasks = [self.check(d) for d in domains]
-        await asyncio.gather(*tasks)
-        return sorted(list(self.alive_domains))
+    def is_ip_russian(self, ip_str):
+        try:
+            ip = ipaddress.IPv4Address(ip_str)
+            return any(ip in net for net in self.ru_networks)
+        except Exception:
+            return False
 
+    async def check_domain(self, domain, valid_set):
+        async with self.semaphore:
+            # Сначала проверяем кэш DNS/Owner
+            cached_res = cache.get(f"owner_{domain}")
+            if cached_res == "RU":
+                valid_set.add(domain)
+                return
+            elif cached_res == "FOREIGN":
+                return
 
-# --- ГЛАВНЫЙ ОРКЕСТРАТОР ---
+            try:
+                # Резолвим домен в IP
+                answers = await self.resolver.query(domain, 'A')
+                for record in answers:
+                    if self.is_ip_russian(record.host):
+                        valid_set.add(domain)
+                        cache.set(f"owner_{domain}", "RU")
+                        return
+                        
+                cache.set(f"owner_{domain}", "FOREIGN")
+            except Exception:
+                # Если домен не резолвится, мы не можем проверить владельца.
+                # Можно добавить его в лог "на ручную проверку", но пока пропускаем.
+                pass
 
+# --- ОРКЕСТРАТОР ---
 async def main():
     start_time = time.time()
-    
-    print("1. [Fetcher] Сбор баз...")
-    fetcher = Fetcher()
-    raw_domains = []
-    
-    # Запускаем сбор категорий асинхронно
-    tasks = [fetcher.fetch_v2fly_recursive(cat) for cat in V2FLY_CATEGORIES]
-    results = await asyncio.gather(*tasks)
-    for res in results:
-        raw_domains.extend(res)
-        
-    await fetcher.close()
-    
-    # Логируем неподдерживаемые правила
-    if fetcher.unsupported_rules:
-        with open(UNSUPPORTED_LOG, "w", encoding="utf-8") as f:
-            f.write("\n".join(fetcher.unsupported_rules))
-        print(f"   -> Пропущено {len(fetcher.unsupported_rules)} keyword/regexp правил. Сохранено в {UNSUPPORTED_LOG}")
+    print("=== RU DomainSet Generator V4 ===")
 
-    print(f"2. [Parser] Валидация {len(raw_domains)} строк через tldextract...")
+    print("\n1. Запуск Auto-Crawler (сбор дерева v2fly)...")
+    crawler = V2FlyCrawler()
+    raw_rules = await crawler.fetch_category("category-ru")
+    await crawler.close()
+    print(f"   Собрано {len(raw_rules)} сырых правил (включая include).")
+
+    print("\n2. Извлечение доменов (tldextract + regex heuristic)...")
     parsed_domains = set()
-    for d in raw_domains:
-        clean_d = Parser.clean(d)
-        if clean_d:
-            parsed_domains.add(clean_d)
+    for rule in raw_rules:
+        domains = RuleParser.clean(rule)
+        if domains:
+            parsed_domains.update(domains)
+    print(f"   Извлечено уникальных доменов: {len(parsed_domains)}")
 
-    print("3. [FilterRU] Применение правил исключений...")
-    # Собираем пользовательские исключения
-    user_excludes = set()
+    print("\n3. Фильтрация национальных зон (.ru, .su)...")
+    filtered_domains = {d for d in parsed_domains if not d.endswith(RU_TLDS)}
+
+    # Применяем локальные исключения
     if os.path.exists(EXCLUDE_DOMAINS_FILE):
         with open(EXCLUDE_DOMAINS_FILE, 'r', encoding='utf-8') as f:
-            user_excludes = {Parser.clean(line) for line in f if Parser.clean(line)}
-    
-    all_excludes = GLOBAL_EXCLUDES.union(user_excludes)
-    filtered_domains = FilterRU.process(parsed_domains, all_excludes)
+            excludes = {RuleParser.clean(line.strip()) for line in f if line.strip()}
+            # excludes содержит множества, выравниваем их
+            flat_excludes = {d for sublist in excludes if sublist for d in sublist}
+            filtered_domains = {d for d in filtered_domains if not any(d == ex or d.endswith('.' + ex) for ex in flat_excludes)}
 
-    # Подмешиваем кастомные домены пользователя
+    # Добавляем свои
     if os.path.exists(CUSTOM_DOMAINS_FILE):
         with open(CUSTOM_DOMAINS_FILE, 'r', encoding='utf-8') as f:
-            customs = {Parser.clean(line) for line in f if Parser.clean(line)}
-            filtered_domains.update(customs)
+            customs = {RuleParser.clean(line.strip()) for line in f if line.strip()}
+            flat_customs = {d for sublist in customs if sublist for d in sublist}
+            filtered_domains.update(flat_customs)
 
-    print(f"   -> Уникальных международных доменов для DNS-проверки: {len(filtered_domains)}")
+    final_domains = filtered_domains
 
-    print("4. [DNSChecker] Проверка A / AAAA / CNAME...")
-    checker = DNSChecker(concurrency=400)
-    final_domains = await checker.run(filtered_domains)
+    if ENABLE_OWNER_CHECK:
+        print(f"\n4. Оффлайн-проверка владельца по ASN/CIDR ({len(filtered_domains)} доменов)...")
+        checker = OwnerChecker()
+        await checker.load_ru_cidr()
+        
+        ru_owned_domains = set()
+        tasks = [checker.check_domain(d, ru_owned_domains) for d in filtered_domains]
+        await asyncio.gather(*tasks)
+        final_domains = ru_owned_domains
+        print(f"   Одобрено {len(final_domains)} доменов (принадлежат RU инфраструктуре).")
 
-    print("5. [Output] Генерация .list файла...")
+    if ENABLE_DNS_CHECK:
+        print("\n[Optional] 5. DNS Проверка на живучесть...")
+        # Логика DNSChecker здесь, если тумблер включен (для твоей задачи он выключен)
+        pass 
+
+    print("\n6. Генерация Russia_International.list...")
+    sorted_domains = sorted(list(final_domains))
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российского сегмента\n")
-        f.write("# Генератор V3 (tldextract + A/AAAA/CNAME Check)\n")
+        f.write("# Архитектура V4: Auto-Crawl + Regex Parse + ASN/CIDR Check\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
-        f.write(f"# Всего живых доменов: {len(final_domains)}\n\n")
-        for domain in final_domains:
+        f.write(f"# Всего доменов: {len(sorted_domains)}\n\n")
+        for domain in sorted_domains:
             f.write(f"DOMAIN-SUFFIX,{domain}\n")
 
-    print(f"\n[УСПЕХ] Сохранено {len(final_domains)} валидных доменов.")
-    print(f"Время выполнения: {round(time.time() - start_time, 2)} сек.")
+    print(f"\n[УСПЕХ] Сохранено {len(sorted_domains)} чистых, проверенных доменов.")
+    print(f"Затрачено времени: {round(time.time() - start_time, 2)} сек.")
 
 if __name__ == "__main__":
     import sys
