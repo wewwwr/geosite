@@ -3,28 +3,52 @@ import httpx
 import re
 import time
 import os
+import json
 import sqlite3
 import tldextract
 from contextlib import closing
 from collections import defaultdict
 
-# --- КОНФИГУРАЦИЯ ---
-WEIGHT_THRESHOLD = 10
+# --- КОНФИГУРАЦИЯ ИСТОЧНИКОВ ---
+WEIGHT_THRESHOLD = 100
 
-# Веса источников
-WEIGHTS = {
-    'v2fly': 10,
-    'metacubex': 8,
-    'blackmatrix7': 7,
-    'loyalsoldier': 7,
-    'custom': 20
-}
+SOURCES_CONFIG = [
+    {
+        "name": "V2Fly",
+        "type": "v2fly_tree",
+        "url": "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/",
+        "entry_point": "category-ru",
+        "weight": 100
+    },
+    {
+        "name": "MetaCubeX",
+        "type": "plain",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/ru.list",
+        "weight": 80
+    },
+    {
+        "name": "Loyalsoldier",
+        "type": "plain",
+        # Для примера берем прямой текстовый исходник от Loyalsoldier (yandex/mailru и тд)
+        "url": "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt",
+        "weight": 70
+    },
+    {
+        "name": "BlackMatrix",
+        "type": "plain",
+        "url": "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Russia/Russia.list",
+        "weight": 60
+    }
+]
+
+CUSTOM_WEIGHT = 500
 
 RU_TLDS = ('.ru', '.рф', '.su', '.xn--p1ai')
 CUSTOM_DOMAINS_FILE = "custom_domains.txt"
 EXCLUDE_DOMAINS_FILE = "exclude_domains.txt"
 CACHE_DB = ".cache.db"
 
+# Инициализация tldextract
 extract = tldextract.TLDExtract(cache_dir='.tld_cache')
 
 # --- КЭШ ---
@@ -53,18 +77,28 @@ class LocalCache:
 
 cache = LocalCache()
 
-# --- ПАРСЕР ---
+# --- ПАРСЕР И НОРМАЛИЗАТОР ---
 class RuleParser:
     @staticmethod
+    def get_registered_domain(domain_str):
+        """Возвращает строго корневой домен (registrable domain). api.vk.com -> vk.com"""
+        ext = extract(domain_str)
+        if ext.registered_domain:
+            return ext.registered_domain.lower()
+        return None
+
+    @staticmethod
     def extract_from_regex(rule):
+        # Очистка от сложных regex-конструкций вроде (?:^|\.)
         clean_rule = rule.replace('regexp:', '').replace('\\.', '.')
-        clean_rule = re.sub(r'[\^$()|*+?\[\]\\]', ' ', clean_rule)
+        clean_rule = re.sub(r'(?:\(\?\:\^\|\\\.|\^|\\b|\$)', ' ', clean_rule)
+        clean_rule = re.sub(r'[\(\)|*+?\[\]\\]', ' ', clean_rule)
+        
         matches = re.findall(r'[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+', clean_rule)
         domains = set()
         for m in matches:
-            ext = extract(m)
-            if ext.suffix and ext.domain:
-                domains.add(f"{ext.domain}.{ext.suffix}".lower())
+            rd = RuleParser.get_registered_domain(m)
+            if rd: domains.add(rd)
         return domains
 
     @staticmethod
@@ -77,7 +111,6 @@ class RuleParser:
         if raw_rule.startswith('regexp:'):
             domains.update(RuleParser.extract_from_regex(raw_rule))
         else:
-            # Парсинг .list / yaml / clash / v2ray
             if ',' in raw_rule:
                 parts = raw_rule.split(',')
                 if parts[0].strip().upper() in ('DOMAIN-SUFFIX', 'DOMAIN'):
@@ -86,98 +119,86 @@ class RuleParser:
                     return set()
                     
             raw_rule = raw_rule.replace('full:', '').replace('domain:', '').replace('+', '').split('@')[0].strip()
-            # Убираем кавычки из yaml если есть
             raw_rule = raw_rule.replace("'", "").replace('"', "")
             
-            ext = extract(raw_rule)
-            if ext.suffix and ext.domain:
-                parsed = f"{ext.subdomain}.{ext.domain}.{ext.suffix}" if ext.subdomain else f"{ext.domain}.{ext.suffix}"
-                domains.add(parsed.lower())
+            rd = RuleParser.get_registered_domain(raw_rule)
+            if rd: domains.add(rd)
         return domains
 
-# --- МОДУЛИ ИСТОЧНИКОВ ---
-class SourceCrawler:
+# --- ДВИЖОК СБОРА ---
+class CrawlerEngine:
     def __init__(self):
         self.client = httpx.AsyncClient(http2=True, timeout=15.0)
 
     async def fetch(self, url, cache_key):
         cached = cache.get(cache_key)
-        if cached:
-            return cached
+        if cached: return cached
         try:
             resp = await self.client.get(url)
             if resp.status_code == 200:
                 cache.set(cache_key, resp.text)
                 return resp.text
         except Exception as e:
-            print(f"  [-] Ошибка загрузки {url}: {e}")
+            print(f"  [-] Ошибка: {url} -> {e}")
         return ""
 
-    async def close(self):
-        await self.client.aclose()
-
-class V2Fly(SourceCrawler):
-    def __init__(self):
-        super().__init__()
-        self.visited = set()
-        self.base_url = "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/"
-
-    async def crawl(self, category="category-ru"):
-        if category in self.visited:
-            return set()
-        self.visited.add(category)
+    async def crawl_v2fly_tree(self, base_url, category, visited):
+        if category in visited: return set()
+        visited.add(category)
         
-        text = await self.fetch(f"{self.base_url}{category}", f"v2fly_{category}")
+        text = await self.fetch(f"{base_url}{category}", f"v2fly_{category}")
         rules = set()
         for line in text.splitlines():
             line = line.strip()
             if line.startswith('include:'):
                 sub_cat = line.split('include:')[1].strip()
-                rules.update(await self.crawl(sub_cat))
+                rules.update(await self.crawl_v2fly_tree(base_url, sub_cat, visited))
             else:
                 rules.update(RuleParser.clean(line))
         return rules
 
-class BlackMatrix(SourceCrawler):
-    async def crawl(self):
-        url = "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Shadowrocket/Russia/Russia.list"
-        text = await self.fetch(url, "blackmatrix_ru")
-        rules = set()
-        for line in text.splitlines():
-            rules.update(RuleParser.clean(line))
-        return rules
+    async def run_source(self, source_conf):
+        print(f"  [>] Парсинг источника: {source_conf['name']} (Вес: {source_conf['weight']})")
+        if source_conf['type'] == 'v2fly_tree':
+            return await self.crawl_v2fly_tree(source_conf['url'], source_conf['entry_point'], set())
+        elif source_conf['type'] == 'plain':
+            text = await self.fetch(source_conf['url'], f"plain_{source_conf['name']}")
+            rules = set()
+            for line in text.splitlines():
+                rules.update(RuleParser.clean(line))
+            return rules
+        return set()
 
-# --- RDAP CHECKER (Фоллбэк для серой зоны) ---
+    async def close(self):
+        await self.client.aclose()
+
+# --- RDAP CHECKER ---
 class RDAPChecker:
     def __init__(self):
         self.client = httpx.AsyncClient(http2=True, timeout=10.0)
-        self.semaphore = asyncio.Semaphore(10) # Строгий лимит для RDAP API
+        self.semaphore = asyncio.Semaphore(10)
 
     async def is_russian(self, domain):
-        # Проверяем кэш (храним RDAP 30 дней)
         cached = cache.get(f"rdap_{domain}", ttl=2592000)
         if cached == 'RU': return True
         if cached == 'FOREIGN': return False
 
-        # Если не tld, а субдомен, достаем корень
-        ext = extract(domain)
-        root_domain = f"{ext.domain}.{ext.suffix}"
-
         async with self.semaphore:
             try:
-                # Используем публичный RDAP bootstrap
-                resp = await self.client.get(f"https://rdap.org/domain/{root_domain}")
+                resp = await self.client.get(f"https://rdap.org/domain/{domain}")
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Ищем маркеры RU в entities или country
-                    is_ru = False
-                    for entity in data.get('entities', []):
-                        for address in entity.get('vcardArray', [[]])[1]:
-                            if isinstance(address, list) and 'ru' in [str(x).lower() for x in address]:
-                                is_ru = True
-                                break
                     
-                    if is_ru:
+                    # Тотальный поиск паттернов по всему дампу JSON
+                    dump = json.dumps(data).lower()
+                    
+                    # Ищем маркеры RU-сегмента (страна, город, юрлицо)
+                    markers = [
+                        '"country": "ru"', '"country":"ru"', '"cc": "ru"', '"cc":"ru"',
+                        'russian federation', 'moscow', 'saint petersburg', 'yandex llc'
+                    ]
+                    
+                    if any(marker in dump for marker in markers):
                         cache.set(f"rdap_{domain}", 'RU')
                         return True
             except Exception:
@@ -192,40 +213,28 @@ class RDAPChecker:
 # --- ОРКЕСТРАТОР ---
 async def main():
     start_time = time.time()
-    print("=== RU DomainSet Generator V5 (Consensus & Weight System) ===")
+    print("=== RU DomainSet Generator V6 (Root Domain + RDAP JSON) ===")
 
-    # Словарь для суммирования весов: {domain: total_weight}
     domain_weights = defaultdict(int)
 
-    # 1. СБОР ИЗ ИСТОЧНИКОВ
-    print("\n1. Запуск распределенного сбора...")
-    
-    # V2Fly
-    v2fly = V2Fly()
-    v2fly_domains = await v2fly.crawl("category-ru")
-    await v2fly.close()
-    for d in v2fly_domains: domain_weights[d] += WEIGHTS['v2fly']
-    print(f"   [V2Fly] Собрано: {len(v2fly_domains)}")
+    # 1. ЗАПУСК ИСТОЧНИКОВ ИЗ КОНФИГА
+    crawler = CrawlerEngine()
+    for conf in SOURCES_CONFIG:
+        domains = await crawler.run_source(conf)
+        for d in domains:
+            domain_weights[d] += conf['weight']
+    await crawler.close()
 
-    # BlackMatrix7
-    bm7 = BlackMatrix()
-    bm7_domains = await bm7.crawl()
-    await bm7.close()
-    for d in bm7_domains: domain_weights[d] += WEIGHTS['blackmatrix7']
-    print(f"   [BlackMatrix7] Собрано: {len(bm7_domains)}")
-
-    # MetaCubeX / Loyalsoldier добавляются аналогично...
-    
-    # Custom Whitelist
+    # Добавляем локальные whitelist домены
     if os.path.exists(CUSTOM_DOMAINS_FILE):
+        print(f"  [>] Парсинг источника: Local Custom (Вес: {CUSTOM_WEIGHT})")
         with open(CUSTOM_DOMAINS_FILE, 'r', encoding='utf-8') as f:
             for line in f:
                 for d in RuleParser.clean(line):
-                    domain_weights[d] += WEIGHTS['custom']
+                    domain_weights[d] += CUSTOM_WEIGHT
 
-    # 2. ФИЛЬТРАЦИЯ
-    print("\n2. Фильтрация и дедупликация...")
-    # Применяем пользовательские исключения (жесткое удаление)
+    # 2. ФИЛЬТРАЦИЯ .RU И ИСКЛЮЧЕНИЙ
+    print("\n2. Очистка и фильтрация...")
     exclude_set = set()
     if os.path.exists(EXCLUDE_DOMAINS_FILE):
         with open(EXCLUDE_DOMAINS_FILE, 'r', encoding='utf-8') as f:
@@ -234,13 +243,11 @@ async def main():
 
     candidate_domains = {}
     for dom, weight in domain_weights.items():
-        if dom.endswith(RU_TLDS):
-            continue
-        # Строгая дедупликация и удаление исключенных
-        if not any(dom == ex or dom.endswith('.' + ex) for ex in exclude_set):
-            candidate_domains[dom] = weight
+        if dom.endswith(RU_TLDS): continue
+        if dom in exclude_set: continue
+        candidate_domains[dom] = weight
 
-    # 3. АНАЛИЗ ВЕСОВ И СЕРОЙ ЗОНЫ
+    # 3. АНАЛИЗ ВЕСОВ
     final_domains = set()
     grey_zone = set()
 
@@ -250,39 +257,36 @@ async def main():
         else:
             grey_zone.add(dom)
 
-    print(f"   Зеленая зона (вес >= {WEIGHT_THRESHOLD}): {len(final_domains)} доменов.")
-    print(f"   Серая зона (недостаточно веса): {len(grey_zone)} доменов.")
+    print(f"   Зеленая зона (Вес >= {WEIGHT_THRESHOLD}): {len(final_domains)} доменов.")
+    print(f"   Серая зона (Требует RDAP): {len(grey_zone)} доменов.")
 
     # 4. RDAP ПРОВЕРКА СЕРОЙ ЗОНЫ
     if grey_zone:
-        print("\n4. RDAP-проверка владельцев серой зоны...")
+        print("\n4. Выполнение RDAP-проверки...")
         rdap = RDAPChecker()
         
         async def verify_and_add(d):
             if await rdap.is_russian(d):
                 final_domains.add(d)
 
-        # Обрабатываем асинхронно, но батчами, чтобы не положить rdap.org
         tasks = [verify_and_add(d) for d in grey_zone]
         await asyncio.gather(*tasks)
         await rdap.close()
 
     # 5. ГЕНЕРАЦИЯ
-    # Сортировка для аккуратности
     sorted_domains = sorted(list(final_domains))
     
     print("\n5. Запись Russia_International.list...")
     with open("Russia_International.list", "w", encoding="utf-8") as f:
         f.write("# Зеркало международных доменов российского сегмента\n")
-        f.write("# Архитектура V5: Consensus Weight System + RDAP\n")
+        f.write("# Архитектура V6 (Root Domain Configurable Pipeline)\n")
         f.write(f"# Обновлено: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
         f.write(f"# Всего уникальных доменов: {len(sorted_domains)}\n\n")
         
         for domain in sorted_domains:
-            # Генерация строгого, валидного синтаксиса для Shadowrocket без дублей и лишних параметров
             f.write(f"DOMAIN-SUFFIX,{domain}\n")
 
-    print(f"\n[УСПЕХ] Сохранено {len(sorted_domains)} чистых, проверенных доменов.")
+    print(f"\n[УСПЕХ] Сохранено {len(sorted_domains)} чистых корневых доменов.")
     print(f"Затрачено времени: {round(time.time() - start_time, 2)} сек.")
 
 if __name__ == "__main__":
