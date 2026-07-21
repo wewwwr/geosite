@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-07-20 05:34:16 UTC
-# Всего уникальных доменов: 764
+# Обновлено: 2026-07-21 05:16:15 UTC
+# Всего уникальных доменов: 770
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -25,6 +25,7 @@ DOMAIN-SUFFIX,2gis.tech
 DOMAIN-SUFFIX,2gis.tj
 DOMAIN-SUFFIX,2gis.uz
 DOMAIN-SUFFIX,3ebra.net
+DOMAIN-SUFFIX,3gppnetwork.org
 DOMAIN-SUFFIX,4epenaxa.com
 DOMAIN-SUFFIX,5post.market
 DOMAIN-SUFFIX,accesspoint.uz
@@ -59,6 +60,7 @@ DOMAIN-SUFFIX,baranky.com
 DOMAIN-SUFFIX,bargipsy.com
 DOMAIN-SUFFIX,beeline.tv
 DOMAIN-SUFFIX,beget.com
+DOMAIN-SUFFIX,best2pay.net
 DOMAIN-SUFFIX,bizmrg.com
 DOMAIN-SUFFIX,bk6bba-resources.com
 DOMAIN-SUFFIX,book1917.live
@@ -213,6 +215,7 @@ DOMAIN-SUFFIX,haicomdc.com
 DOMAIN-SUFFIX,hayya.ae
 DOMAIN-SUFFIX,hh.by
 DOMAIN-SUFFIX,hh.kz
+DOMAIN-SUFFIX,hva.im
 DOMAIN-SUFFIX,icq-download.com
 DOMAIN-SUFFIX,icq-mobile.com
 DOMAIN-SUFFIX,icq-online.com
@@ -417,7 +420,10 @@ DOMAIN-SUFFIX,pz.help
 DOMAIN-SUFFIX,rabbitcounter.com
 DOMAIN-SUFFIX,rabota.by
 DOMAIN-SUFFIX,randomgodbot.com
+DOMAIN-SUFFIX,rbsgate.com
+DOMAIN-SUFFIX,rbsuat.com
 DOMAIN-SUFFIX,rbth.com
+DOMAIN-SUFFIX,reaviz.com
 DOMAIN-SUFFIX,reg.cloud
 DOMAIN-SUFFIX,reg.com
 DOMAIN-SUFFIX,reso-med.com
