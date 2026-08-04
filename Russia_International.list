@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-08-03 05:36:31 UTC
-# Всего уникальных доменов: 807
+# Обновлено: 2026-08-04 04:59:31 UTC
+# Всего уникальных доменов: 811
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -407,14 +407,17 @@ DOMAIN-SUFFIX,okolo.app
 DOMAIN-SUFFIX,opennet.dev
 DOMAIN-SUFFIX,oskelly.co
 DOMAIN-SUFFIX,ostin.com
+DOMAIN-SUFFIX,ozon.app
 DOMAIN-SUFFIX,ozon.by
 DOMAIN-SUFFIX,ozon.com
 DOMAIN-SUFFIX,ozon.com.by
 DOMAIN-SUFFIX,ozon.com.kz
 DOMAIN-SUFFIX,ozon.dev
 DOMAIN-SUFFIX,ozon.express
+DOMAIN-SUFFIX,ozon.global
 DOMAIN-SUFFIX,ozon.kz
 DOMAIN-SUFFIX,ozon.li
+DOMAIN-SUFFIX,ozon.market
 DOMAIN-SUFFIX,ozon.tech
 DOMAIN-SUFFIX,ozon.tm
 DOMAIN-SUFFIX,ozon.travel
@@ -527,6 +530,7 @@ DOMAIN-SUFFIX,russiatoday.tv
 DOMAIN-SUFFIX,russieactuelle.fr
 DOMAIN-SUFFIX,rustore.team
 DOMAIN-SUFFIX,rustore.tv
+DOMAIN-SUFFIX,rutube.sport
 DOMAIN-SUFFIX,rwbautomation.tech
 DOMAIN-SUFFIX,saas-support.com
 DOMAIN-SUFFIX,safeliner.tech
