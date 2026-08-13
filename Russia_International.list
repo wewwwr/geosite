@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-08-12 04:00:36 UTC
-# Всего уникальных доменов: 811
+# Обновлено: 2026-08-13 04:05:17 UTC
+# Всего уникальных доменов: 812
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -770,6 +770,7 @@ DOMAIN-SUFFIX,yandex.ee
 DOMAIN-SUFFIX,yandex.eu
 DOMAIN-SUFFIX,yandex.fi
 DOMAIN-SUFFIX,yandex.fr
+DOMAIN-SUFFIX,yandex.it
 DOMAIN-SUFFIX,yandex.jobs
 DOMAIN-SUFFIX,yandex.kg
 DOMAIN-SUFFIX,yandex.kz
