@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-10-19 07:12:06 UTC
-# Всего уникальных доменов: 856
+# Обновлено: 2026-10-20 06:59:46 UTC
+# Всего уникальных доменов: 858
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -242,6 +242,7 @@ DOMAIN-SUFFIX,groupib.us
 DOMAIN-SUFFIX,gw2ru.com
 DOMAIN-SUFFIX,haicomdc.com
 DOMAIN-SUFFIX,hayya.ae
+DOMAIN-SUFFIX,hellodoc.app
 DOMAIN-SUFFIX,hh.by
 DOMAIN-SUFFIX,hh.kz
 DOMAIN-SUFFIX,home.bank
@@ -368,6 +369,7 @@ DOMAIN-SUFFIX,mail-carrotquest.io
 DOMAIN-SUFFIX,mailicq.org
 DOMAIN-SUFFIX,maritimebank.com
 DOMAIN-SUFFIX,mcs.st
+DOMAIN-SUFFIX,medrocket.me
 DOMAIN-SUFFIX,medsi.com
 DOMAIN-SUFFIX,medsi.pro
 DOMAIN-SUFFIX,megafon.com
