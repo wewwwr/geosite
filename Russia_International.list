@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-10-21 06:53:05 UTC
-# Всего уникальных доменов: 862
+# Обновлено: 2026-10-22 06:57:30 UTC
+# Всего уникальных доменов: 865
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -157,6 +157,9 @@ DOMAIN-SUFFIX,drweb.com
 DOMAIN-SUFFIX,drweb.fr
 DOMAIN-SUFFIX,drweb.kz
 DOMAIN-SUFFIX,drweb.uz
+DOMAIN-SUFFIX,ds-servers.com
+DOMAIN-SUFFIX,dsn.host
+DOMAIN-SUFFIX,dsncdn.net
 DOMAIN-SUFFIX,durovscode.com
 DOMAIN-SUFFIX,eadaily.com
 DOMAIN-SUFFIX,eadaily.info
