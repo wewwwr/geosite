@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-10-28 07:49:06 UTC
-# Всего уникальных доменов: 865
+# Обновлено: 2026-10-29 07:54:51 UTC
+# Всего уникальных доменов: 866
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -294,6 +294,7 @@ DOMAIN-SUFFIX,icqtutor.com
 DOMAIN-SUFFIX,icqvideo.com
 DOMAIN-SUFFIX,ideco.dev
 DOMAIN-SUFFIX,it-territory.com
+DOMAIN-SUFFIX,ivi.tv
 DOMAIN-SUFFIX,ivicdn.tv
 DOMAIN-SUFFIX,ixbt.com
 DOMAIN-SUFFIX,ixbt.games
