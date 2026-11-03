@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-11-02 08:44:07 UTC
-# Всего уникальных доменов: 866
+# Обновлено: 2026-11-03 08:55:10 UTC
+# Всего уникальных доменов: 868
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -69,6 +69,7 @@ DOMAIN-SUFFIX,beget.app
 DOMAIN-SUFFIX,beget.cloud
 DOMAIN-SUFFIX,beget.com
 DOMAIN-SUFFIX,beget.de
+DOMAIN-SUFFIX,beget.email
 DOMAIN-SUFFIX,beget.hosting
 DOMAIN-SUFFIX,beget.pro
 DOMAIN-SUFFIX,beget.tech
@@ -870,5 +871,6 @@ DOMAIN-SUFFIX,ydb.tech
 DOMAIN-SUFFIX,yndx.net
 DOMAIN-SUFFIX,youla.io
 DOMAIN-SUFFIX,yourgood.app
+DOMAIN-SUFFIX,zapishu.me
 DOMAIN-SUFFIX,zvuk-b2b.com
 DOMAIN-SUFFIX,zvuk.com
