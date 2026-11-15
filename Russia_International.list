@@ -1,7 +1,7 @@
 # Зеркало международных доменов российского сегмента
 # Источники: V2Fly (category-ru), MetaCubeX, BlackMatrix
-# Обновлено: 2026-11-14 08:26:36 UTC
-# Всего уникальных доменов: 870
+# Обновлено: 2026-11-15 08:43:13 UTC
+# Всего уникальных доменов: 871
 
 # --- Пользовательские домены (Custom) ---
 DOMAIN-SUFFIX,ru
@@ -701,6 +701,7 @@ DOMAIN-SUFFIX,unirest.tech
 DOMAIN-SUFFIX,us.kg
 DOMAIN-SUFFIX,userapi.com
 DOMAIN-SUFFIX,usocial.pro
+DOMAIN-SUFFIX,vigo.tech
 DOMAIN-SUFFIX,vimu.tv
 DOMAIN-SUFFIX,viqeo.tv
 DOMAIN-SUFFIX,viqeotv.com
